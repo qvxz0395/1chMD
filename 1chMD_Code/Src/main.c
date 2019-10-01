@@ -168,11 +168,11 @@ void TIM1_BRK_UP_TRG_COM_IRQHandler(void)//TIM1 timer interruption
 	static int i;
 	if(i<1)
 	{
-		Motor_pwm(3);
+		Motor_pwm(1.5);
 	}
 	if(i>=1)
 	{
-		Motor_pwm(-3);
+		Motor_pwm(1.5);
 	}
 	i++;
 	if(i==2) i=0;
