@@ -50,11 +50,12 @@
 //Current limit
 #define CURRENT_LIMIT_DT 40 //x0.1ms
 #define CURRENT_LIMIT_FALL_RATIO 70 //percent
+#define CURRENT_LIMIT_RISING_RATIO 5 //percent
 
 //Duty resolution and PWM frequency
 #define PWM_PSC (1-1)
 #define PWM_ARR (2000-1)//	48MHz/PWM_PSC*PWM_ARR = PWM frequency
-#define PWM_DUTY_MAX 99
+#define PWM_CHANGE_CONTROL_THRESHOLD 85
 #define PWM_DUTY_MAX_ABS 50
 
 //Timer interruption1 frequency
@@ -192,7 +193,7 @@ void TIM14_IRQHandler(void)
   /* USER CODE BEGIN TIM14_IRQn 1 */
   	float sum=0;
 
-  	for(uint16_t i =0; i<CURRENT_AVERAGING_NUM; i++)
+  	for(uint16_t i =0; i<CURRENT_AVERAGING_NUM; i++)//get current value by normalization filter
 	{
 		HAL_ADC_Start_DMA(&hadc,(uint32_t *)ADC_Data,ADC_CONVERTED_DATA_BUFFER_SIZE);//start adc
 		if(HAL_GPIO_ReadPin(PHASE_GPIO_Port,PHASE_Pin) == 1) sum += ADC_Data[0];
@@ -229,25 +230,18 @@ void TIM14_IRQHandler(void)
 
 		if(fabs(current_average_dt) > Current_Limit_Value && PWM_Duty_Max > 0)//current shut down
 		{
-			Error_State|=(1<<CURRENT_LIMIT_OVER);
 			PWM_Duty_Max = (float)duty_average_dt*CURRENT_LIMIT_FALL_RATIO/100;
+			Error_State|=(1<<CURRENT_LIMIT_OVER);
 		}
 		else if(PWM_Duty_Max < PWM_DUTY_MAX_ABS)
 		{
+			PWM_Duty_Max+=CURRENT_LIMIT_RISING_RATIO;
 			Error_State&=~(1<<CURRENT_LIMIT_OVER);
 			Error_State|=(1<<CURRENT_LIMIT_RISING);
-			PWM_Duty_Max+=5;
 		}
 		else Error_State&=~(1<<CURRENT_LIMIT_RISING|1<<CURRENT_LIMIT_OVER);
 
-		if(Duty_Present > PWM_Duty_Max)
-		{
-			Error_State|=(1<<PWM_DUTY_MAX_OVER);
-			Duty_Present = PWM_Duty_Max;
-		}
-		else Error_State&=~(1<<PWM_DUTY_MAX_OVER);
-
-		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, Duty_Present*(PWM_ARR+1)/100);
+		Motor_pwm(Duty_Present);
 	}
 	/* USER CODE END TIM14_IRQn 1 */
 }
@@ -299,6 +293,8 @@ int main(void)
   HAL_ADCEx_Calibration_Start(&hadc);//adc calibration
   HAL_TIM_Encoder_Start(&htim3,TIM_CHANNEL_ALL);//encoder start
   HAL_TIM_PWM_Start(&htim2,TIM_CHANNEL_1);//PWM generation
+  HAL_TIM_PWM_Start(&htim2,TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim2,TIM_CHANNEL_4);
   HAL_ADC_Start_DMA(&hadc,(uint32_t *)ADC_Data,ADC_CONVERTED_DATA_BUFFER_SIZE);//start adc
   HAL_Delay(1000);
   HAL_TIM_Base_Start_IT(&htim1);//timer interruption
@@ -624,6 +620,14 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN TIM2_Init 2 */
 
   /* USER CODE END TIM2_Init 2 */
@@ -777,14 +781,14 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, PWML_Pin|SR_Pin|PHASE_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(SR_GPIO_Port, SR_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : PWML_Pin SR_Pin PHASE_Pin */
-  GPIO_InitStruct.Pin = PWML_Pin|SR_Pin|PHASE_Pin;
+  /*Configure GPIO pin : SR_Pin */
+  GPIO_InitStruct.Pin = SR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_Init(SR_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : DIP0_Pin DIP1_Pin */
   GPIO_InitStruct.Pin = DIP0_Pin|DIP1_Pin;
@@ -828,36 +832,48 @@ int Get_Enocder_Value(void)
 
 void Motor_pwm(float duty)
 {
-	if(fabs(duty > PWM_DUTY_MAX_ABS)) Error_State|=(1<<PWM_Duty_Max);
-	else Error_State &=~(1<<PWM_DUTY_MAX_ABS_OVER);
-
-	if(fabs(duty) > PWM_DUTY_MAX)
+//limit PWM
+	if(fabs(duty) > PWM_DUTY_MAX_ABS)
 	{
-		if(duty < 0) duty = -100;
-		else duty = 100;
+		duty = (duty/fabs(duty)) *PWM_DUTY_MAX_ABS;
+		Error_State|=(1<<PWM_DUTY_MAX_ABS_OVER);
+	}
+	else
+	{
+		duty = PWM_DUTY_MAX_ABS;
+		Error_State &=~(1<<PWM_DUTY_MAX_ABS_OVER);
 	}
 
-	if(duty < 0)
+	if(fabs(duty) > PWM_Duty_Max)
 	{
-		HAL_GPIO_WritePin(PHASE_GPIO_Port,PHASE_Pin,0);
-		duty*=-1;
-	}
-	else HAL_GPIO_WritePin(PHASE_GPIO_Port,PHASE_Pin,1);
-
-	if(duty > PWM_Duty_Max)
-	{
+		duty = (duty/fabs(duty)) *PWM_Duty_Max;// current limit.
 		Error_State|=(1<<PWM_DUTY_MAX_OVER);
-		duty = PWM_Duty_Max;// bootstrap limit. 100% can drive by charge pump in A3921 and current limit
 	}
 	else Error_State&=~(1<<PWM_DUTY_MAX_OVER);
 
 	Duty_Present = duty;
 
+//output PWM
+	if(duty < 0)//set direction
+	{
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, 0);
+		duty*=-1;
+	}
+	else __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, PWM_ARR+1);
 
-
-	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, Duty_Present*(PWM_ARR+1)/100);//translate duty to PWM_ARR.
+	if(duty > PWM_CHANGE_CONTROL_THRESHOLD)//PWM_FET_Lo
+	{
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, PWM_ARR+1);
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, duty*(PWM_ARR+1)/100);
+	}
+	else//PWM_FET_Hi
+	{
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, PWM_ARR+1);
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, duty*(PWM_ARR+1)/100);
+	}
 
 }
+
 
 void Motor_InitSetting(char setting)
 {
@@ -869,8 +885,8 @@ void Motor_InitSetting(char setting)
 	{
 		HAL_GPIO_WritePin(SR_GPIO_Port,SR_Pin,1);
 	}
-	HAL_GPIO_WritePin(PWML_GPIO_Port,PWML_Pin,1);
 }
+
 
 double pid(double present, double target)
 {
