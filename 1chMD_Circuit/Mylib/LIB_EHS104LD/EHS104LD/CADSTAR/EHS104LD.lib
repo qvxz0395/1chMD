@@ -1,0 +1,17 @@
+.EHS104LD :1 ;4 Position DIP Switch
+EHS104LD
+*STM S
+*NGS
+*PLB 1="1" 2="2" 3="3" 4="4" 5="5" 6="6" 7="7" 8="8"
+*MXP 8
+*DFN EHS104LD
+~!Manufacturer_Name (ECE)
+~!Manufacturer_Part_Number (EHS104LD)
+~!Mouser Part Number (-)
+~!Mouser Price/Stock (-)
+~!RS Part Number (-)
+~!RS Price/Stock (-)
+~!Link Datasheet (http://akizukidenshi.com/download/ds/excelcell/ehs.pdf)
+~!Height (1mm)
+EHS104LD
+1.1!U 2.1!U 3.1!U 4.1!U 5.1!U 6.1!U 7.1!U 8.1!U 

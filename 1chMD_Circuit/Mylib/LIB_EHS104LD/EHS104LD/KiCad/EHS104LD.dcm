@@ -1,0 +1,9 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP EHS104LD
+D 4 Position DIP Switch
+K
+F http://akizukidenshi.com/download/ds/excelcell/ehs.pdf
+$ENDCMP
+#
+#End Doc Library
