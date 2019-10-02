@@ -42,16 +42,24 @@
 #define KI 0
 #define KD 0
 //ADC
-#define ADC_CONVERTED_DATA_BUFFER_SIZE   ((uint32_t)  1)
-#define CURRENT_AVERAGING_NUM 100//[times]
+#define ADC_CONVERTED_DATA_BUFFER_SIZE 1
+#define CURRENT_AVERAGING_NUM 10//[times]
 #define CURRENT_SENS 0.0176//[V/A]
 #define CURRENT_DRIFT 0.332//[V]
 #define CURRENT_DRIFT_VALUE 406.97//[-]
 #define VOLTAGE_REF 3.32//[V]
 #define VOLTAGE_REF_VALUE 4093.64//[-]
-
+//ADC_Slope = (VOLTAGE_REF - CURRENT_DRIFT)/(VOLTAGE_REF_VALUE - CURRENT_DRIFT_VALUE);
+#define ADC_Slope 0.00081048751312
+//ADC_Offset = VOLTAGE_REF - (((VOLTAGE_REF - CURRENT_DRIFT)/(VOLTAGE_REF_VALUE - CURRENT_DRIFT_VALUE))*VOLTAGE_REF_VALUE) ;
+#define ADC_Offset 0.0021558967849
+//((fabs(sum)*ADC_Slope + ADC_Offset - CURRENT_DRIFT)/CURRENT_SENS)
+// current value = (a*s+o-d)/c = a*(s/c) + ((o-d)/c)
+#define CURRENT_S_C 0.04605042688
+#define CURRENT_OD_C -18.741142228
+#define LPF_VALUE 0.05
 //Current limit
-#define CURRENT_LIMIT_DT 40 //x0.1ms
+#define CURRENT_LIMIT_DT 1 //x0.1ms
 #define CURRENT_LIMIT_FALL_RATIO 70 //percent
 #define CURRENT_LIMIT_RISING_RATIO 5 //percent
 
@@ -62,10 +70,10 @@
 #define PWM_DUTY_MAX_ABS 100
 
 //Timer interruption1 frequency
-#define TIM1_PSC (10-1)//48MHz/Timer_PSC = Timer interruption1(main control) frequency
-#define TIM1_ARR (480-1)
+#define TIM1_PSC (48-1)//48MHz/Timer_PSC = Timer interruption1(main control) frequency
+#define TIM1_ARR (1000-1)
 #define TIM14_PSC (48-1)
-#define TIM14_ARR (100-1)
+#define TIM14_ARR (500-1)
 
 /* USER CODE END PD */
 
@@ -81,10 +89,14 @@ DMA_HandleTypeDef hdma_adc;
 CAN_HandleTypeDef hcan;
 
 
+SPI_HandleTypeDef hspi1;
+
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim14;
+
+UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 
@@ -92,24 +104,15 @@ float target_value =1;
 
 //ADC
 uint16_t ADC_Data[ADC_CONVERTED_DATA_BUFFER_SIZE];
-float ADC_Slope = (VOLTAGE_REF - CURRENT_DRIFT)/(VOLTAGE_REF_VALUE - CURRENT_DRIFT_VALUE);
-float ADC_Offset = VOLTAGE_REF - (((VOLTAGE_REF - CURRENT_DRIFT)/(VOLTAGE_REF_VALUE - CURRENT_DRIFT_VALUE))*VOLTAGE_REF_VALUE) ;
 
 //PWM
 float Duty_Present = 0;//100%=100
-uint16_t PWM_Duty_Max=PWM_DUTY_MAX_ABS;//[%]
+uint8_t PWM_Duty_Max=PWM_DUTY_MAX_ABS;//[%]
 
 //Current
-float Current_Present = 0;//[A]
+double Current_Present = 0;//[A]
 float Current_Limit_Value = 5;//[A] //if Current_Limit_State is ENABLE and over this value become duty down except for transient over.
 uint8_t Current_Limit_State= ENABLE;
-
-//pid
-double diff_[2];
-double integral_;
-double p_, i_, d_;
-double kp_=KP, ki_=KI, kd_=KD;
-double control_;
 
 //ERROR
 typedef enum{
@@ -119,21 +122,11 @@ typedef enum{
 	CURRENT_LIMIT_RISING,
 	CURRENT_LIMIT_OVER
 }error;
-uint64_t Error_State=0;
-//debug value
-uint8_t LED1_State=0;
-uint8_t LED2_State=0;
-uint8_t PHASE_State = 0;
-uint8_t SR_State = 0;
-uint8_t PWML_State = 0;
-uint8_t DIP0_State = 0;
-uint8_t DIP1_State = 0;
-uint8_t DIP2_State = 0;
-uint8_t DIP3_State = 0;
-int16_t Enc_Value = 0;
+uint8_t Error_State=0;
 
 float CURRENT_AVERAGE_DT;
 float DUTY_AVERAGE_DT;
+
 
 /* USER CODE END PV */
 
@@ -143,18 +136,19 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC_Init(void);
 static void MX_CAN_Init(void);
-
+static void MX_SPI1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_USART1_UART_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM14_Init(void);
-
+static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 int Get_Enocder_Value(void);
 float Get_Current_Value(void);
 void Motor_pwm(float pwm);
 void Motor_InitSetting(char setting);
-double pid(double present, double target);
+float pid(float present, float target);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -163,10 +157,9 @@ double pid(double present, double target);
 void TIM1_BRK_UP_TRG_COM_IRQHandler(void)//TIM1 timer interruption
 {
 
-	static float i,cos_;
-	cos_ = arm_sin_f32(i);
-	Motor_pwm(cos_);
-	i+=0.01;
+
+
+
 
 
 	HAL_TIM_IRQHandler(&htim1);
@@ -177,21 +170,46 @@ void TIM1_BRK_UP_TRG_COM_IRQHandler(void)//TIM1 timer interruption
 void TIM14_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM14_IRQn 0 */
+	static float cos_,i;
 
+	Motor_pwm(cos_);
+	i=i+0.00005;
+	cos_ = 5*arm_sin_f32(6.28318530718*i);
   /* USER CODE END TIM14_IRQn 0 */
   HAL_TIM_IRQHandler(&htim14);
   /* USER CODE BEGIN TIM14_IRQn 1 */
-  	float sum=0;
+/*
+  float sum=0;
+  static float sum_prev;
 
-  	for(uint16_t i =0; i<CURRENT_AVERAGING_NUM; i++)//get current value by normalization filter
+	for(uint16_t i =0; i<CURRENT_AVERAGING_NUM; i++)//get current value by normalization filter
 	{
 		HAL_ADC_Start_DMA(&hadc,(uint32_t *)ADC_Data,ADC_CONVERTED_DATA_BUFFER_SIZE);//start adc
 		if(HAL_GPIO_ReadPin(PHASE_GPIO_Port,PHASE_Pin) == 1) sum += ADC_Data[0];
 		else sum -= ADC_Data[0];
 	}
 	sum/=CURRENT_AVERAGING_NUM;
+	sum = (1-LPF_VALUE)*sum_prev + LPF_VALUE*(sum);
+	sum_prev=sum;
 	Current_Present = (sum/fabs(sum))*((fabs(sum)*ADC_Slope + ADC_Offset - CURRENT_DRIFT)/CURRENT_SENS);
+	//Current_Present = 50*(sum/fabs(sum))*((fabs(sum)*CURRENT_S_C) + CURRENT_OD_C);
+*/
 
+  	static double current;
+  	HAL_ADC_Start_DMA(&hadc,(uint32_t *)ADC_Data,ADC_CONVERTED_DATA_BUFFER_SIZE);//start adc
+	if(HAL_GPIO_ReadPin(PHASE_GPIO_Port,PHASE_Pin) == 1)
+	{
+		current = (1-LPF_VALUE)*current + LPF_VALUE*(ADC_Data[0]);
+		Current_Present = 1*(current*CURRENT_S_C + CURRENT_OD_C);
+	}
+	else
+	{
+		current = (1-LPF_VALUE)*current + LPF_VALUE*(ADC_Data[0]);
+		Current_Present = -1*(current*CURRENT_S_C + CURRENT_OD_C);
+	}
+
+
+/*
 	if(Current_Limit_State == ENABLE)//current limit
 	{
 		static float current_buff[CURRENT_LIMIT_DT];
@@ -233,7 +251,7 @@ void TIM14_IRQHandler(void)
 
 		Motor_pwm(Duty_Present);
 	}
-
+*/
 	/* USER CODE END TIM14_IRQn 1 */
 }
 
@@ -271,10 +289,13 @@ int main(void)
   MX_DMA_Init();
   MX_ADC_Init();
   MX_CAN_Init();
+  MX_SPI1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
+  MX_USART1_UART_Init();
   MX_TIM1_Init();
   MX_TIM14_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   Motor_InitSetting(1);
   Current_Limit_State=ENABLE;
@@ -386,7 +407,7 @@ static void MX_ADC_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_9;
   sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
-  sConfig.SamplingTime = ADC_SAMPLETIME_7CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
   if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -434,6 +455,55 @@ static void MX_CAN_Init(void)
 
 }
 
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+}
+
+/**
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI1_Init(void)
+{
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_HARD_OUTPUT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 7;
+  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+  hspi1.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
+}
 
 /**
   * @brief TIM1 Initialization Function
@@ -527,10 +597,6 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
-  {
-    Error_Handler();
-  }
   /* USER CODE BEGIN TIM2_Init 2 */
 
   /* USER CODE END TIM2_Init 2 */
@@ -618,6 +684,40 @@ static void MX_TIM14_Init(void)
 
 }
 
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
 
 /** 
   * Enable DMA controller clock
@@ -650,14 +750,14 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(SR_GPIO_Port, SR_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, SR_Pin|PHASE_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : SR_Pin */
-  GPIO_InitStruct.Pin = SR_Pin;
+  /*Configure GPIO pins : SR_Pin PHASE_Pin */
+  GPIO_InitStruct.Pin = SR_Pin|PHASE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(SR_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : DIP0_Pin DIP1_Pin */
   GPIO_InitStruct.Pin = DIP0_Pin|DIP1_Pin;
@@ -702,29 +802,27 @@ int Get_Enocder_Value(void)
 void Motor_pwm(float duty)
 {
 //limit PWM
-	if(fabs(duty) > PWM_DUTY_MAX_ABS)
+	if(duty > 0 && duty > PWM_DUTY_MAX_ABS)
 	{
-		duty = (duty/fabs(duty)) *PWM_DUTY_MAX_ABS;
+		duty = PWM_DUTY_MAX_ABS;
+		Error_State|=(1<<PWM_DUTY_MAX_ABS_OVER);
+	}
+	else if((duty < 0 && duty < -1*PWM_DUTY_MAX_ABS))
+	{
+		duty = -1*PWM_DUTY_MAX_ABS;
 		Error_State|=(1<<PWM_DUTY_MAX_ABS_OVER);
 	}
 	else Error_State &=~(1<<PWM_DUTY_MAX_ABS_OVER);
-
-	if(fabs(duty) > PWM_Duty_Max)
-	{
-		duty = (duty/fabs(duty)) *PWM_Duty_Max;// current limit.
-		Error_State|=(1<<PWM_DUTY_MAX_OVER);
-	}
-	else Error_State&=~(1<<PWM_DUTY_MAX_OVER);
 
 	Duty_Present = duty;
 
 //output PWM
 	if(duty < 0)//set direction
 	{
-		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, 0);
+		HAL_GPIO_WritePin(PHASE_GPIO_Port,PHASE_Pin,0);
 		duty*=-1;
 	}
-	else __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, PWM_ARR+1);
+	else HAL_GPIO_WritePin(PHASE_GPIO_Port,PHASE_Pin,1);
 
 	if(duty > PWM_CHANGE_CONTROL_THRESHOLD)//PWM_FET_Lo
 	{
@@ -753,9 +851,16 @@ void Motor_InitSetting(char setting)
 }
 
 
-double pid(double present, double target)
+float pid(float present, float target)
 {
-	double difference = target-present;
+	//pid
+	static float diff_[2];
+	static float integral_;
+	static float p_, i_, d_;
+	static float kp_=KP, ki_=KI, kd_=KD;
+	static float control_;
+
+	float difference = target-present;
     diff_[0] = diff_[1];
     diff_[1] = difference;
 

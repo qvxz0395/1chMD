@@ -155,6 +155,10 @@ void DMA1_Channel1_IRQHandler(void)
   /* USER CODE END DMA1_Channel1_IRQn 1 */
 }
 
+/**
+  * @brief This function handles TIM1 break, update, trigger and commutation interrupts.
+  */
+
 
 /* USER CODE BEGIN 1 */
 
