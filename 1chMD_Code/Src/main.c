@@ -838,11 +838,7 @@ void Motor_pwm(float duty)
 		duty = (duty/fabs(duty)) *PWM_DUTY_MAX_ABS;
 		Error_State|=(1<<PWM_DUTY_MAX_ABS_OVER);
 	}
-	else
-	{
-		duty = PWM_DUTY_MAX_ABS;
-		Error_State &=~(1<<PWM_DUTY_MAX_ABS_OVER);
-	}
+	else Error_State &=~(1<<PWM_DUTY_MAX_ABS_OVER);
 
 	if(fabs(duty) > PWM_Duty_Max)
 	{
