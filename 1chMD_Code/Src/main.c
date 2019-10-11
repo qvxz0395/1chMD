@@ -82,7 +82,6 @@ DMA_HandleTypeDef hdma_adc;
 
 CAN_HandleTypeDef hcan;
 
-
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
@@ -93,6 +92,11 @@ UART_HandleTypeDef huart1;
 /* USER CODE BEGIN PV */
 
 float target_value =1;
+
+//CAN
+CAN_TxHeaderTypeDef pHeader;
+CAN_FilterTypeDef sFilterConfig;
+uint32_t pTxMailbox;
 
 //ADC
 uint16_t ADC_Data[ADC_CONVERTED_DATA_BUFFER_SIZE];
@@ -116,7 +120,8 @@ typedef enum{
 	PWM_DUTY_MAX_ABS_OVER,
 	PWM_DUTY_MAX_OVER,
 	CURRENT_LIMIT_RISING,
-	CURRENT_LIMIT_OVER
+	CURRENT_LIMIT_OVER,
+	CAN_ERROR
 }error;
 uint8_t Error_State=0;
 
@@ -143,6 +148,8 @@ float Get_Current_Value(void);
 void Motor_pwm(float pwm);
 void Motor_InitSetting(char setting);
 float pid(float present, float target);
+void CAN_Tx(uint8_t adata[]);
+void CAN_Rx(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -150,8 +157,9 @@ float pid(float present, float target);
 
 void TIM1_BRK_UP_TRG_COM_IRQHandler(void)//TIM1 timer interruption
 {
-
+	HAL_TIM_IRQHandler(&htim1);
 	static float cos_,i=0;
+	uint8_t data[]={0b10101010,0b10101010};
 	//Motor_pwm(cos_);
 	i=i+0.001;
 	target_value =0.5*arm_sin_f32(6.28318530718*i);
@@ -166,9 +174,9 @@ void TIM1_BRK_UP_TRG_COM_IRQHandler(void)//TIM1 timer interruption
 
 	//Motor_pwm(0);
 
+	CAN_Tx(data);
 
 
-	HAL_TIM_IRQHandler(&htim1);
 
 	//Motor_pwm(pid(Current_Value,target_value));
 }
@@ -249,7 +257,6 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -271,6 +278,7 @@ int main(void)
   HAL_TIM_PWM_Start(&htim2,TIM_CHANNEL_1);//PWM generation
   HAL_TIM_PWM_Start(&htim2,TIM_CHANNEL_2);
   HAL_TIM_PWM_Start(&htim2,TIM_CHANNEL_4);
+  HAL_CAN_Start(&hcan);
   HAL_Delay(1000);
   HAL_TIM_Base_Start_IT(&htim1);//timer interruption
   HAL_TIM_Base_Start_IT(&htim14);
@@ -299,12 +307,9 @@ void SystemClock_Config(void)
 
   /** Initializes the CPU, AHB and APB busses clocks 
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSI14
-                              |RCC_OSCILLATORTYPE_HSI48;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI14|RCC_OSCILLATORTYPE_HSI48;
   RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.HSI14State = RCC_HSI14_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.HSI14CalibrationValue = 16;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
@@ -323,9 +328,8 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART1|RCC_PERIPHCLK_I2C1;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART1;
   PeriphClkInit.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK1;
-  PeriphClkInit.I2c1ClockSelection = RCC_I2C1CLKSOURCE_HSI;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
@@ -373,7 +377,7 @@ static void MX_ADC_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_9;
   sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
-  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_7CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -400,11 +404,11 @@ static void MX_CAN_Init(void)
 
   /* USER CODE END CAN_Init 1 */
   hcan.Instance = CAN;
-  hcan.Init.Prescaler = 16;
+  hcan.Init.Prescaler = 6;
   hcan.Init.Mode = CAN_MODE_NORMAL;
   hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan.Init.TimeSeg1 = CAN_BS1_1TQ;
-  hcan.Init.TimeSeg2 = CAN_BS2_1TQ;
+  hcan.Init.TimeSeg1 = CAN_BS1_14TQ;
+  hcan.Init.TimeSeg2 = CAN_BS2_4TQ;
   hcan.Init.TimeTriggeredMode = DISABLE;
   hcan.Init.AutoBusOff = DISABLE;
   hcan.Init.AutoWakeUp = DISABLE;
@@ -417,22 +421,18 @@ static void MX_CAN_Init(void)
   }
   /* USER CODE BEGIN CAN_Init 2 */
 
+  HAL_GPIO_WritePin(CAN_STBY_GPIO_Port,CAN_STBY_Pin,0);
+  sFilterConfig.FilterMaskIdHigh = 0;
+  sFilterConfig.FilterMaskIdLow = 0;
+  sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
+  sFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
+  sFilterConfig.FilterFIFOAssignment =CAN_FILTER_FIFO0;
+  sFilterConfig.FilterActivation = CAN_FILTER_ENABLE;
+
+  HAL_CAN_ConfigFilter(&hcan, &sFilterConfig);
   /* USER CODE END CAN_Init 2 */
 
 }
-
-/**
-  * @brief I2C1 Initialization Function
-  * @param None
-  * @retval None
-  */
-
-
-/**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
 
 /**
   * @brief TIM1 Initialization Function
@@ -674,31 +674,32 @@ static void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, SR_Pin|PHASE_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, SR_Pin|PHASE_Pin|CAN_STBY_Pin|LED1_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : SR_Pin PHASE_Pin */
-  GPIO_InitStruct.Pin = SR_Pin|PHASE_Pin;
+  /*Configure GPIO pins : SR_Pin PHASE_Pin CAN_STBY_Pin LED1_Pin */
+  GPIO_InitStruct.Pin = SR_Pin|PHASE_Pin|CAN_STBY_Pin|LED1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : DIP0_Pin DIP1_Pin */
-  GPIO_InitStruct.Pin = DIP0_Pin|DIP1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  /*Configure GPIO pin : PA7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF0_SPI1;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : DIP2_Pin DIP3_Pin */
-  GPIO_InitStruct.Pin = DIP2_Pin|DIP3_Pin;
+  /*Configure GPIO pin : FF2_Pin */
+  GPIO_InitStruct.Pin = FF2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(FF2_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : FF1_Pin */
   GPIO_InitStruct.Pin = FF1_Pin;
@@ -712,11 +713,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(ENC_X_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : FF2_Pin */
-  GPIO_InitStruct.Pin = FF2_Pin;
+  /*Configure GPIO pin : DIP3_Pin */
+  GPIO_InitStruct.Pin = DIP3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(DIP3_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(FF2_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF2_TIM16;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
 }
 
@@ -824,6 +833,25 @@ float pid(float present, float target)
     d_ = kd_ * (diff_[0] - diff_[1]);
     control_ = p_ + i_ + d_;
     return control_;
+}
+
+void CAN_Tx(uint8_t adata[])
+{
+	  pHeader.StdId = 0x124;
+	  pHeader.IDE = CAN_ID_STD;
+	  pHeader.RTR = CAN_RTR_DATA;
+	  pHeader.DLC = 2;
+	  pHeader.TransmitGlobalTime = DISABLE;
+	  adata[0] =10;
+	  adata[1] =0;
+	  if(HAL_CAN_AddTxMessage(&hcan, &pHeader, adata, &pTxMailbox) != HAL_OK) Error_State|=(1<<CAN_ERROR);
+	  else Error_State&=~(1<<CAN_ERROR);
+
+}
+
+void CAN_Rx(void)
+{
+
 }
 
 /* USER CODE END 4 */
