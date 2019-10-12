@@ -64,10 +64,10 @@ float CURRENT_DRIFT_VALUE;
 #define PWM_DUTY_MAX_ABS 30
 
 //Timer interruption1 frequency
-#define TIM1_PSC (48-1)//48MHz/Timer_PSC = Timer interruption1(main control) frequency
+#define TIM1_PSC (48000-1)//48MHz/Timer_PSC = Timer interruption1(main control) frequency
 #define TIM1_ARR (1000-1)
 #define TIM14_PSC (48-1)
-#define TIM14_ARR (250-1)
+#define TIM14_ARR (2500-1)
 
 /* USER CODE END PD */
 
@@ -94,9 +94,13 @@ UART_HandleTypeDef huart1;
 float target_value =1;
 
 //CAN
-CAN_TxHeaderTypeDef pHeader;
+CAN_TxHeaderTypeDef TxHeader;
+CAN_RxHeaderTypeDef RxHeader;
 CAN_FilterTypeDef sFilterConfig;
 uint32_t pTxMailbox;
+uint32_t mailbox,timestamp;
+uint8_t CAN_ReceiveData[8]={};
+
 
 //ADC
 uint16_t ADC_Data[ADC_CONVERTED_DATA_BUFFER_SIZE];
@@ -148,7 +152,7 @@ float Get_Current_Value(void);
 void Motor_pwm(float pwm);
 void Motor_InitSetting(char setting);
 float pid(float present, float target);
-void CAN_Tx(uint8_t adata[]);
+void CAN_Tx(uint8_t aData[]);
 void CAN_Rx(void);
 /* USER CODE END PFP */
 
@@ -159,7 +163,7 @@ void TIM1_BRK_UP_TRG_COM_IRQHandler(void)//TIM1 timer interruption
 {
 	HAL_TIM_IRQHandler(&htim1);
 	static float cos_,i=0;
-	uint8_t data[]={0b10101010,0b10101010};
+	uint8_t CAN_data[]={0b10101010U,0b11010010U};
 	//Motor_pwm(cos_);
 	i=i+0.001;
 	target_value =0.5*arm_sin_f32(6.28318530718*i);
@@ -169,12 +173,15 @@ void TIM1_BRK_UP_TRG_COM_IRQHandler(void)//TIM1 timer interruption
 	//i++;
 	//if(i==2) i=0;
 
-	Duty_Present += pid(Current_Present,target_value);
-	Motor_pwm(Duty_Present);
-
+	//Duty_Present += pid(Current_Present,target_value);
+	//Motor_pwm(Duty_Present);
+	//CAN_Tx(CAN_data);
+	CAN_Rx();
+	//mailbox = HAL_CAN_GetTxMailboxesFreeLevel(&hcan);
+	//timestamp = HAL_CAN_GetTxTimestamp(&hcan,pTxMailbox);
 	//Motor_pwm(0);
 
-	CAN_Tx(data);
+
 
 
 
@@ -213,7 +220,6 @@ void TIM14_IRQHandler(void)
 
 	if(Current_Limit_State == ENABLE)//current limit
 	{
-
 		current_abs_high_lpf = (1-CURRENT_LIMIT_LPF_VALUE)*current_abs_prev_high_lpf + CURRENT_LIMIT_LPF_VALUE*((sum-CURRENT_DRIFT_VALUE)*VOLTAGE_REF/(CURRENT_SENS*VOLTAGE_REF_VALUE));
 		current_abs_prev_high_lpf = current_abs_high_lpf;
 		current_average_dt = direction*current_abs_high_lpf;
@@ -404,11 +410,11 @@ static void MX_CAN_Init(void)
 
   /* USER CODE END CAN_Init 1 */
   hcan.Instance = CAN;
-  hcan.Init.Prescaler = 6;
+  hcan.Init.Prescaler = 60000;
   hcan.Init.Mode = CAN_MODE_NORMAL;
   hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
   hcan.Init.TimeSeg1 = CAN_BS1_14TQ;
-  hcan.Init.TimeSeg2 = CAN_BS2_4TQ;
+  hcan.Init.TimeSeg2 = CAN_BS2_1TQ;
   hcan.Init.TimeTriggeredMode = DISABLE;
   hcan.Init.AutoBusOff = DISABLE;
   hcan.Init.AutoWakeUp = DISABLE;
@@ -421,7 +427,7 @@ static void MX_CAN_Init(void)
   }
   /* USER CODE BEGIN CAN_Init 2 */
 
-  HAL_GPIO_WritePin(CAN_STBY_GPIO_Port,CAN_STBY_Pin,0);
+  HAL_GPIO_WritePin(CAN_STBY_GPIO_Port,CAN_STBY_Pin,1);
   sFilterConfig.FilterMaskIdHigh = 0;
   sFilterConfig.FilterMaskIdLow = 0;
   sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
@@ -835,23 +841,29 @@ float pid(float present, float target)
     return control_;
 }
 
-void CAN_Tx(uint8_t adata[])
+void CAN_Tx(uint8_t aData[])
 {
-	  pHeader.StdId = 0x124;
-	  pHeader.IDE = CAN_ID_STD;
-	  pHeader.RTR = CAN_RTR_DATA;
-	  pHeader.DLC = 2;
-	  pHeader.TransmitGlobalTime = DISABLE;
-	  adata[0] =10;
-	  adata[1] =0;
-	  if(HAL_CAN_AddTxMessage(&hcan, &pHeader, adata, &pTxMailbox) != HAL_OK) Error_State|=(1<<CAN_ERROR);
+	TxHeader.StdId = 0x124;
+	TxHeader.ExtId = 0x0;
+	TxHeader.IDE = CAN_ID_STD;
+	TxHeader.RTR = CAN_RTR_DATA;
+	TxHeader.DLC = sizeof(aData)/sizeof(uint8_t);
+	TxHeader.TransmitGlobalTime = DISABLE;
+
+	  if(HAL_CAN_AddTxMessage(&hcan, &TxHeader, aData, &pTxMailbox) != HAL_OK) Error_State|=(1<<CAN_ERROR);
 	  else Error_State&=~(1<<CAN_ERROR);
 
 }
 
 void CAN_Rx(void)
 {
+	RxHeader.StdId = 0x124;
+	RxHeader.ExtId = 0x0;
+	RxHeader.IDE = CAN_ID_STD;
+	RxHeader.RTR = CAN_RTR_DATA;
+	RxHeader.DLC = sizeof(CAN_ReceiveData)/sizeof(uint8_t);
 
+	HAL_CAN_GetRxMessage(&hcan,CAN_RX_FIFO0,&RxHeader,CAN_ReceiveData);
 }
 
 /* USER CODE END 4 */
