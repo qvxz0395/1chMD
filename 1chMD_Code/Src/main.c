@@ -64,10 +64,10 @@ float CURRENT_DRIFT_VALUE;
 #define PWM_DUTY_MAX_ABS 30
 
 //Timer interruption1 frequency
-#define TIM1_PSC (48000-1)//48MHz/Timer_PSC = Timer interruption1(main control) frequency
+#define TIM1_PSC (48-1)//48MHz/Timer_PSC = Timer interruption1(main control) frequency
 #define TIM1_ARR (1000-1)
 #define TIM14_PSC (48-1)
-#define TIM14_ARR (2500-1)
+#define TIM14_ARR (250-1)
 
 /* USER CODE END PD */
 
@@ -94,11 +94,10 @@ UART_HandleTypeDef huart1;
 float target_value =1;
 
 //CAN
-CAN_TxHeaderTypeDef TxHeader;
-CAN_RxHeaderTypeDef RxHeader;
-CAN_FilterTypeDef sFilterConfig;
+
 uint32_t pTxMailbox;
 uint32_t mailbox,timestamp;
+uint8_t CAN_data[]={0xaa,0x55,0x00,0x00,0xff,0x01,0x80,0x45};
 uint8_t CAN_ReceiveData[8]={};
 
 
@@ -163,7 +162,7 @@ void TIM1_BRK_UP_TRG_COM_IRQHandler(void)//TIM1 timer interruption
 {
 	HAL_TIM_IRQHandler(&htim1);
 	static float cos_,i=0;
-	uint8_t CAN_data[]={0b10101010U,0b11010010U};
+
 	//Motor_pwm(cos_);
 	i=i+0.001;
 	target_value =0.5*arm_sin_f32(6.28318530718*i);
@@ -175,15 +174,8 @@ void TIM1_BRK_UP_TRG_COM_IRQHandler(void)//TIM1 timer interruption
 
 	//Duty_Present += pid(Current_Present,target_value);
 	//Motor_pwm(Duty_Present);
-	//CAN_Tx(CAN_data);
-	CAN_Rx();
-	//mailbox = HAL_CAN_GetTxMailboxesFreeLevel(&hcan);
-	//timestamp = HAL_CAN_GetTxTimestamp(&hcan,pTxMailbox);
+
 	//Motor_pwm(0);
-
-
-
-
 
 	//Motor_pwm(pid(Current_Value,target_value));
 }
@@ -192,6 +184,8 @@ void TIM14_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM14_IRQn 0 */
 
+	//CAN_Rx();
+	CAN_Tx(CAN_data);
   /* USER CODE END TIM14_IRQn 0 */
   HAL_TIM_IRQHandler(&htim14);
   /* USER CODE BEGIN TIM14_IRQn 1 */
@@ -233,6 +227,7 @@ void TIM14_IRQHandler(void)
 
 		Motor_pwm(Duty_Present);
 	}
+	HAL_CAN_IRQHandler(&hcan);
 
 	/* USER CODE END TIM14_IRQn 1 */
 }
@@ -285,9 +280,11 @@ int main(void)
   HAL_TIM_PWM_Start(&htim2,TIM_CHANNEL_2);
   HAL_TIM_PWM_Start(&htim2,TIM_CHANNEL_4);
   HAL_CAN_Start(&hcan);
-  HAL_Delay(1000);
-  HAL_TIM_Base_Start_IT(&htim1);//timer interruption
+  HAL_Delay(10);
   HAL_TIM_Base_Start_IT(&htim14);
+  HAL_Delay(500);
+  HAL_TIM_Base_Start_IT(&htim1);//timer interruption
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -410,7 +407,7 @@ static void MX_CAN_Init(void)
 
   /* USER CODE END CAN_Init 1 */
   hcan.Instance = CAN;
-  hcan.Init.Prescaler = 60000;
+  hcan.Init.Prescaler = 6;
   hcan.Init.Mode = CAN_MODE_NORMAL;
   hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
   hcan.Init.TimeSeg1 = CAN_BS1_14TQ;
@@ -427,15 +424,16 @@ static void MX_CAN_Init(void)
   }
   /* USER CODE BEGIN CAN_Init 2 */
 
-  HAL_GPIO_WritePin(CAN_STBY_GPIO_Port,CAN_STBY_Pin,1);
-  sFilterConfig.FilterMaskIdHigh = 0;
-  sFilterConfig.FilterMaskIdLow = 0;
-  sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
-  sFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
-  sFilterConfig.FilterFIFOAssignment =CAN_FILTER_FIFO0;
-  sFilterConfig.FilterActivation = CAN_FILTER_ENABLE;
+  HAL_GPIO_WritePin(CAN_STBY_GPIO_Port,CAN_STBY_Pin,0);
+ // CAN_FilterTypeDef sFilterConfig;
+ // sFilterConfig.FilterMaskIdHigh = 0;
+ // sFilterConfig.FilterMaskIdLow = 0;
+ // sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
+ // sFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
+ // sFilterConfig.FilterFIFOAssignment =CAN_FILTER_FIFO0;
+//  sFilterConfig.FilterActivation = CAN_FILTER_ENABLE;
 
-  HAL_CAN_ConfigFilter(&hcan, &sFilterConfig);
+ // HAL_CAN_ConfigFilter(&hcan, &sFilterConfig);
   /* USER CODE END CAN_Init 2 */
 
 }
@@ -843,7 +841,8 @@ float pid(float present, float target)
 
 void CAN_Tx(uint8_t aData[])
 {
-	TxHeader.StdId = 0x124;
+	CAN_TxHeaderTypeDef TxHeader;
+	TxHeader.StdId = 0x8;
 	TxHeader.ExtId = 0x0;
 	TxHeader.IDE = CAN_ID_STD;
 	TxHeader.RTR = CAN_RTR_DATA;
@@ -857,7 +856,8 @@ void CAN_Tx(uint8_t aData[])
 
 void CAN_Rx(void)
 {
-	RxHeader.StdId = 0x124;
+	CAN_RxHeaderTypeDef RxHeader;
+	RxHeader.StdId = 0x6;
 	RxHeader.ExtId = 0x0;
 	RxHeader.IDE = CAN_ID_STD;
 	RxHeader.RTR = CAN_RTR_DATA;
